@@ -73,40 +73,24 @@ class SiLu(nn.Module):
 class SwigGLU(nn.Module):
     d_model: int
     d_ff: int
-    w1_weight: Float[Tensor, " d_ff d_model"]
-    w2_weight: Float[Tensor, " d_model d_ff"]
-    w3_weight: Float[Tensor, " d_ff d_model"]
+    w1: Linear
+    w2: Linear
+    w3: Linear
     silu: nn.Module
     def __init__(self, d_model: int, d_ff: int, device=None, dtype=None):
         super().__init__()
         self.d_model = d_model
         self.d_ff = d_ff
-        self.w1_weight = nn.Parameter(
-            torch.empty(
-                size=(d_ff, d_model),
-                device=device,
-                dtype=dtype
-            ),
-        )
-        self.w2_weight = nn.Parameter(
-            torch.empty(
-                size=(d_model, d_ff),
-                device=device,
-                dtype=dtype
-            )
-        )
-        self.w3_weight = nn.Parameter(
-            torch.empty(
-                size=(d_ff, d_model),
-                device=device,
-                dtype=dtype
-            )
-        )
+        self.w1 = Linear(input_dim=d_model, output_dim=d_ff, device=device, dtype=dtype)
+        self.w2 = Linear(input_dim=d_ff, output_dim=d_model, device=device, dtype=dtype)
+        self.w3 = Linear(input_dim=d_model, output_dim=d_ff, device=device, dtype=dtype)
         self.silu = SiLu()
 
 
     def forward(self, x: Float[Tensor, " ... d_model"]):
-        return (self.silu(x@self.w1_weight.T))*(x@self.w3_weight.T)@self.w2_weight.T
+        h1 = self.silu(self.w1(x))
+        h3 = self.w3(x)
+        return self.w2((h1*h3))
 
 class Softmax(nn.Module):
     def __init__(self):
@@ -138,47 +122,25 @@ class ScaledDotProductAttention(nn.Module):
 
 class MultiheadSelfAttention(nn.Module):
     softmax: nn.Module
-    q_proj_weight: nn.Parameter
-    k_proj_weight: nn.Parameter
-    v_proj_weight: nn.Parameter
-    o_proj_weight: nn.Parameter
+    q_proj: nn.Module
+    k_proj: nn.Module
+    v_proj: nn.Module
+    output_proj: nn.Module
     n_head: int
     d_model: int
     position_encoder: nn.Module | None
+    device: torch.device
+    dtype: torch.dtype
     def __init__(self, d_model: int, num_heads: int, position_encoder: nn.Module|None = None, device=None, dtype=None):
         super().__init__()
         self.softmax = Softmax()
         self.d_model = d_model
         self.n_head = num_heads
         self.position_encoder = position_encoder
-        self.q_proj_weight = nn.Parameter(
-            torch.empty(
-                (d_model, d_model),
-                device=device,
-                dtype=dtype
-            )
-        )
-        self.k_proj_weight = nn.Parameter(
-            torch.empty(
-                (d_model, d_model),
-                device=device,
-                dtype=dtype
-            )
-        )
-        self.v_proj_weight = nn.Parameter(
-            torch.empty(
-                (d_model, d_model),
-                device=device,
-                dtype=dtype
-            )
-        )
-        self.o_proj_weight = nn.Parameter(
-            torch.empty(
-                (d_model, d_model),
-                device=device,
-                dtype=dtype
-            )
-        )
+        self.q_proj = Linear(input_dim=d_model, output_dim=d_model, device=device, dtype=dtype)
+        self.k_proj = Linear(input_dim=d_model, output_dim=d_model, device=device, dtype=dtype)
+        self.v_proj = Linear(input_dim=d_model, output_dim=d_model, device=device, dtype=dtype)
+        self.output_proj = Linear(input_dim=d_model, output_dim=d_model, device=device, dtype=dtype)
     
     def forward(self,
         in_features: Float[Tensor, " ... sequence_length d_model"],
@@ -189,9 +151,9 @@ class MultiheadSelfAttention(nn.Module):
         num_heads = self.n_head
         d_head = d_model // num_heads
         scale = math.sqrt(d_head)
-        Q = in_features @ self.q_proj_weight.T
-        K = in_features @ self.k_proj_weight.T
-        V = in_features @ self.v_proj_weight.T
+        Q = self.q_proj(in_features)
+        K = self.k_proj(in_features)
+        V = self.v_proj(in_features)
         Q = Q.unflatten(-1, (num_heads, d_head)).transpose(-2,-3) # (..., num_head, sequence_length, d_head)
         K = K.unflatten(-1, (num_heads, d_head)).transpose(-2,-3) # (..., num_head, sequence_length, d_head)
         if self.position_encoder is not None and token_positions is not None:
@@ -204,26 +166,26 @@ class MultiheadSelfAttention(nn.Module):
         weights:Float[Tensor, " ... num_heads sequence_length sequence_length"] = self.softmax(attention_score, -1)
         ret = weights @ V # (..., num_head, sequence_length, d_head)
         ret = ret.transpose(-3,-2).flatten(start_dim=-2) # (..., sequence_length, d_model)
-        return ret @ self.o_proj_weight.T
+        return self.output_proj(ret)
 
 class RMSNorm(nn.Module):
     d_model: int
     eps: float
     device: torch.device
     dtype: torch.dtype
-    weights: nn.Parameter
+    weight: nn.Parameter
     def __init__(self, d_model: int, eps: float = 1e-5, device=None, dtype=None):
         super().__init__()
         self.d_model = d_model
         self.eps = eps
         self.device = device
         self.dtype = dtype
-        self.weights = nn.Parameter(torch.empty(d_model))
+        self.weight = nn.Parameter(torch.empty(d_model))
 
     def forward(self, x: Float[Tensor, " ... d_model"]):
         in_dtype = x.dtype
         x = x.to(torch.float32)
         rms = torch.sqrt(torch.sum(x**2, dim=-1, keepdim=True)/self.d_model + self.eps)
-        res = x / rms * self.weights
+        res = x / rms * self.weight
         res = res.to(in_dtype)
         return res
