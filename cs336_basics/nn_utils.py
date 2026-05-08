@@ -205,3 +205,25 @@ class MultiheadSelfAttention(nn.Module):
         ret = weights @ V # (..., num_head, sequence_length, d_head)
         ret = ret.transpose(-3,-2).flatten(start_dim=-2) # (..., sequence_length, d_model)
         return ret @ self.o_proj_weight.T
+
+class RMSNorm(nn.Module):
+    d_model: int
+    eps: float
+    device: torch.device
+    dtype: torch.dtype
+    weights: nn.Parameter
+    def __init__(self, d_model: int, eps: float = 1e-5, device=None, dtype=None):
+        super().__init__()
+        self.d_model = d_model
+        self.eps = eps
+        self.device = device
+        self.dtype = dtype
+        self.weights = nn.Parameter(torch.empty(d_model))
+
+    def forward(self, x: Float[Tensor, " ... d_model"]):
+        in_dtype = x.dtype
+        x = x.to(torch.float32)
+        rms = torch.sqrt(torch.sum(x**2, dim=-1, keepdim=True)/self.d_model + self.eps)
+        res = x / rms * self.weights
+        res = res.to(in_dtype)
+        return res
